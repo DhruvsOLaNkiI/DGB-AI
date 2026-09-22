@@ -285,7 +285,10 @@ HARD BANS (never do these):
 - Do NOT invent citations, news links, or “according to a recent article” claims.
 - Do NOT say you searched the web or looked up live data.
 
-User asked: "{question}"
+CONVERSATION MEMORY (use for follow-ups like “that”, “earlier”, “same”, “down payment for it”):
+{history_block}
+
+Current user question: "{question}"
 
 WORD LIMIT: {word_limit_rule}
 
@@ -302,6 +305,7 @@ CRITICAL RULES:
    disclaimers in the reply. Start directly with the useful answer.
 7. Clean bullets. End with one short practical tip (e.g. verify live listings / share budget).
 8. Headings: use ## or ### only (never #### or raw # hashes left unreadable).
+9. When the current question refers to earlier turns, resolve references from CONVERSATION MEMORY.
 
 COMPARISON FORMAT (when the user compares 2+ options — e.g. sector A vs B,
 flats vs plots, fixed vs floating loan, buy vs rent, Project X vs Y):
@@ -325,6 +329,58 @@ Keep the WHOLE reply (including table) inside the WORD LIMIT above.
 """
 
 _GEMINI_KNOWLEDGE_PROMPT = _GEMINI_ONLY_PROMPT
+
+# ASK DGB-SUP conversation buffer
+_ASK_HISTORY_MAX_TURNS = 8
+_ASK_HISTORY_ASSISTANT_MAX_WORDS = 180
+
+
+def _truncate_words(text: str, max_words: int) -> str:
+    words = re.findall(r"\S+", text or "")
+    if len(words) <= max_words:
+        return (text or "").strip()
+    return " ".join(words[:max_words]).rstrip() + "…"
+
+
+def _format_history_block(
+    history: list[dict] | None,
+    *,
+    current_question: str,
+) -> str:
+    """
+    Build a short conversation buffer for ASK DGB-SUP.
+    Skips the trailing duplicate of the current question when present.
+    """
+    if not history:
+        return "(No earlier turns in this chat.)"
+
+    cleaned: list[tuple[str, str]] = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if not content or role not in {"user", "assistant"}:
+            continue
+        if role == "assistant":
+            content = _truncate_words(content, _ASK_HISTORY_ASSISTANT_MAX_WORDS)
+        cleaned.append((role, content))
+
+    # Drop trailing user message if it duplicates the current question.
+    cq = (current_question or "").strip()
+    if cleaned and cleaned[-1][0] == "user" and cleaned[-1][1] == cq:
+        cleaned = cleaned[:-1]
+
+    # Keep last N turns only.
+    cleaned = cleaned[-_ASK_HISTORY_MAX_TURNS:]
+    if not cleaned:
+        return "(No earlier turns in this chat.)"
+
+    lines = ["Earlier turns in this chat:"]
+    for role, content in cleaned:
+        label = "User" if role == "user" else "Assistant"
+        lines.append(f"{label}: {content}")
+    return "\n".join(lines)
 
 
 def _word_limit_rule(word_limit: int | None) -> str:
@@ -370,10 +426,12 @@ def answer_with_gemini_only(
     *,
     model: str | None = None,
     word_limit: int | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, str]:
     """
     ASK DGB-SUP: pure Gemini knowledge only.
     Never CSV, never DuckDuckGo / web_search, never external tools.
+    Optional conversation buffer via history=[{role, content}, ...].
     """
     if not _gemini_available():
         return (
@@ -403,10 +461,12 @@ def answer_with_gemini_only(
         if mid and mid not in candidates:
             candidates.append(mid)
 
+    q = (question or "").strip()
     limit = int(word_limit or 0)
     prompt = _GEMINI_ONLY_PROMPT.format(
-        question=(question or "").strip(),
+        question=q,
         word_limit_rule=_word_limit_rule(limit),
+        history_block=_format_history_block(history, current_question=q),
     )
     last_err: Exception | None = None
     for mid in candidates:
@@ -512,6 +572,7 @@ def synthesize_external_answer(
         prompt = _GEMINI_KNOWLEDGE_PROMPT.format(
             question=question.strip(),
             word_limit_rule=_word_limit_rule(0),
+            history_block="(No earlier turns in this chat.)",
         )
         text, _which = _invoke_llm_with_gemini_backup(
             prompt, model="gemini-3.6-flash", temperature=0.3
@@ -862,6 +923,7 @@ def run_real_estate_pipeline(
     model: str | None = None,
     force_gemini: bool = False,
     word_limit: int | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, str]:
     """
     Unified pipeline:
@@ -894,7 +956,9 @@ def run_real_estate_pipeline(
             )
         if not is_real_estate_scope(q):
             return out_of_scope_reply(), "out-of-scope"
-        return answer_with_gemini_only(q, model=model, word_limit=word_limit)
+        return answer_with_gemini_only(
+            q, model=model, word_limit=word_limit, history=history
+        )
 
     # Off-topic (cars, phones, food, …) → polite refusal, never Pandas/web.
     if not is_real_estate_scope(q):
@@ -981,6 +1045,7 @@ def query_real_estate_agent(
     model: str | None = None,
     force_gemini: bool = False,
     word_limit: int | None = None,
+    history: list[dict] | None = None,
 ) -> str:
     """
     use_llm=False → Only Pandas (exact facts; no web).
@@ -988,6 +1053,7 @@ def query_real_estate_agent(
     force_gemini  → Manual Gemini Only mode (never Ollama).
     model         → UI answer-model id (gemini-… or ollama/…).
     word_limit    → ASK DGB-SUP max words (0 = unlimited).
+    history       → ASK DGB-SUP conversation buffer [{role, content}, ...].
     Always returns cleaned final text for the API/UI (no chain logs).
     """
     try:
@@ -997,6 +1063,7 @@ def query_real_estate_agent(
             model=model,
             force_gemini=force_gemini,
             word_limit=word_limit,
+            history=history,
         )
         return _clean_agent_reply(reply)
     except Exception as e:

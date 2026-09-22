@@ -25,7 +25,7 @@ import {
 } from "@/lib/rag";
 import { parseRetrievalMode, parsePandasEngine, type RetrievalMode, type PandasEngine } from "@/lib/retrieval-mode";
 import { addSessionUsage, getSessionUsage } from "@/lib/token-budget";
-import { queryLangPanda } from "@/lib/langpanda";
+import { queryLangPanda, buildAskDgbHistory } from "@/lib/langpanda";
 import { chatDocument } from "@/lib/vectorless-docs";
 import { retrieveListingsVectorless } from "@/lib/vectorless";
 import { parseWordLimit } from "@/lib/word-limit";
@@ -143,11 +143,13 @@ export async function POST(request: Request) {
       // ASK DGB-SUP: Gemini own knowledge only — never CSV, never DDGS/web.
       if (mode === "ask_dgb_sup") {
         try {
+          const history = buildAskDgbHistory(messages, question);
           const result = await queryLangPanda(
             question,
             "pandas_gemini",
             answerModel,
             wordLimit,
+            history,
           );
           const sessionUsed = addSessionUsage(sessionId, 0);
           return NextResponse.json({

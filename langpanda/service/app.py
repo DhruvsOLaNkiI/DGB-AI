@@ -27,12 +27,18 @@ app = FastAPI(
 )
 
 
+class HistoryTurn(BaseModel):
+    role: str
+    content: str = ""
+
+
 class AskBody(BaseModel):
     question: str = Field(..., min_length=1)
     use_llm: bool = False
     model: str | None = None
     force_gemini: bool = False
     word_limit: int | None = None
+    history: list[HistoryTurn] | None = None
 
 
 class AskResponse(BaseModel):
@@ -62,6 +68,13 @@ def pandas_chat(body: AskBody):
     question = body.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="question is required")
+    history = None
+    if body.force_gemini and body.history:
+        history = [
+            {"role": t.role, "content": t.content}
+            for t in body.history
+            if (t.content or "").strip()
+        ]
     try:
         reply, source = run_real_estate_pipeline(
             question,
@@ -69,6 +82,7 @@ def pandas_chat(body: AskBody):
             model=body.model,
             force_gemini=body.force_gemini,
             word_limit=body.word_limit,
+            history=history,
         )
     except Exception as exc:  # noqa: BLE001
         # Never surface raw stack traces / Errno to the chat UI.

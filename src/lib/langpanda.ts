@@ -5,9 +5,17 @@ import type { PandasEngine } from "@/lib/retrieval-mode";
 /** Internal engine: pandas_gemini = ASK DGB-SUP (Gemini own knowledge; no CSV / no web). */
 type LangPandaEngine = PandasEngine | "pandas_gemini";
 
+export type LangPandaHistoryTurn = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 const ROOT = process.cwd();
 const LANGPANDA = path.join(ROOT, "langpanda");
 const PYTHON = path.join(LANGPANDA, ".venv", "bin", "python");
+
+/** Max prior turns sent to ASK DGB-SUP (user+assistant messages). */
+export const ASK_DGB_HISTORY_MAX_MESSAGES = 8;
 
 const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]|\[\d+(?:;\d+)*m/g;
 
@@ -41,11 +49,32 @@ export function langpandaRoot(): string {
   return LANGPANDA;
 }
 
+/** Build ASK DGB-SUP history from chat messages (excludes empty; keeps last N). */
+export function buildAskDgbHistory(
+  messages: Array<{ role: string; content?: string }>,
+  currentQuestion: string,
+): LangPandaHistoryTurn[] {
+  const q = currentQuestion.trim();
+  const turns: LangPandaHistoryTurn[] = [];
+  for (const m of messages) {
+    const role = m.role === "assistant" ? "assistant" : m.role === "user" ? "user" : null;
+    const content = (m.content || "").trim();
+    if (!role || !content) continue;
+    turns.push({ role, content });
+  }
+  // Drop trailing duplicate of the current question.
+  if (turns.length && turns[turns.length - 1]!.role === "user" && turns[turns.length - 1]!.content === q) {
+    turns.pop();
+  }
+  return turns.slice(-ASK_DGB_HISTORY_MAX_MESSAGES);
+}
+
 async function askViaHttp(
   question: string,
   engine: LangPandaEngine,
   model?: string,
   wordLimit?: number,
+  history?: LangPandaHistoryTurn[],
 ): Promise<{ reply: string; source?: string } | null> {
   const url = `${serviceUrl()}/pandas-chat`;
   const useLlm = engine === "pandas_llm" || engine === "pandas_gemini";
@@ -65,6 +94,10 @@ async function askViaHttp(
         word_limit:
           engine === "pandas_gemini" && typeof wordLimit === "number"
             ? wordLimit
+            : null,
+        history:
+          engine === "pandas_gemini" && history && history.length > 0
+            ? history
             : null,
       }),
       signal: AbortSignal.timeout(120_000),
@@ -106,6 +139,7 @@ function askViaPython(
   engine: LangPandaEngine,
   model?: string,
   wordLimit?: number,
+  history?: LangPandaHistoryTurn[],
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const useLlm = engine === "pandas_llm" || engine === "pandas_gemini";
@@ -115,14 +149,19 @@ function askViaPython(
       engine === "pandas_gemini" && typeof wordLimit === "number"
         ? String(wordLimit)
         : "0";
+    const historyJson =
+      engine === "pandas_gemini" && history && history.length > 0
+        ? JSON.stringify(history)
+        : "";
     const child = spawn(
       PYTHON,
       [
         "-c",
-        // Marker keeps final answer separable if verbose ever leaks to stdout.
-        "from agent import query_real_estate_agent; import sys; "
+        "from agent import query_real_estate_agent; import sys, json, os; "
           + "wl=int(sys.argv[5]) if sys.argv[5].isdigit() else None; "
-          + "reply = query_real_estate_agent(sys.argv[1], use_llm=(sys.argv[2]=='1'), model=(sys.argv[3] or None), force_gemini=(sys.argv[4]=='1'), word_limit=wl); "
+          + "raw=os.environ.get('LANGPANDA_CHAT_HISTORY') or ''; "
+          + "hist=json.loads(raw) if raw.strip() else None; "
+          + "reply = query_real_estate_agent(sys.argv[1], use_llm=(sys.argv[2]=='1'), model=(sys.argv[3] or None), force_gemini=(sys.argv[4]=='1'), word_limit=wl, history=hist); "
           + "sys.stdout.write('__LANGPANDA_REPLY__\\n' + reply + '\\n')",
         question,
         useLlm ? "1" : "0",
@@ -132,7 +171,10 @@ function askViaPython(
       ],
       {
         cwd: LANGPANDA,
-        env: process.env,
+        env: {
+          ...process.env,
+          ...(historyJson ? { LANGPANDA_CHAT_HISTORY: historyJson } : {}),
+        },
       },
     );
     let stdout = "";
@@ -188,8 +230,9 @@ export async function queryLangPanda(
   engine: LangPandaEngine = "pandas_only",
   model?: string,
   wordLimit?: number,
+  history?: LangPandaHistoryTurn[],
 ): Promise<{ reply: string; source: string }> {
-  const viaHttp = await askViaHttp(question, engine, model, wordLimit);
+  const viaHttp = await askViaHttp(question, engine, model, wordLimit, history);
   if (viaHttp?.reply) {
     return {
       reply: viaHttp.reply,
@@ -202,7 +245,7 @@ export async function queryLangPanda(
             : "pandas-only"),
     };
   }
-  const reply = await askViaPython(question, engine, model, wordLimit);
+  const reply = await askViaPython(question, engine, model, wordLimit, history);
   return {
     reply,
     source:
