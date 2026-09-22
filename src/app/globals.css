@@ -1,26 +1,185 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #fff7f0;
+  --foreground: #1a1a1a;
+  --ink: #1a1a1a;
+  --panel: rgba(255, 255, 255, 0.28);
+  --panel-elevated: rgba(255, 255, 255, 0.55);
+  --border: rgba(255, 255, 255, 0.45);
+  --muted: rgba(26, 26, 26, 0.55);
+  --accent: #f97316;
+  --accent-soft: rgba(249, 115, 22, 0.18);
+  --canvas: transparent;
+  --teal: #f97316;
+  --teal-bright: #fb923c;
+  --mist: rgba(255, 255, 255, 0.35);
+  --on-orange: #ffffff;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-ink: var(--ink);
+  --color-panel: var(--panel);
+  --color-panel-elevated: var(--panel-elevated);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-teal: var(--teal);
+  --color-teal-bright: var(--teal-bright);
+  --color-mist: var(--mist);
+  --color-canvas: var(--canvas);
+  --color-on-orange: var(--on-orange);
+  --font-sans: var(--font-jakarta);
+  --font-display: var(--font-jakarta);
 }
 
 body {
-  background: var(--background);
+  background: #0a0a0a;
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-jakarta), ui-sans-serif, sans-serif;
+  letter-spacing: -0.01em;
+}
+
+.font-display {
+  font-family: var(--font-jakarta), ui-sans-serif, sans-serif;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+/* Force chat answers to stay small / minimal */
+.chat-answer {
+  font-size: 13px !important;
+  font-weight: 400 !important;
+  line-height: 1.55 !important;
+  font-family: var(--font-jakarta), ui-sans-serif, sans-serif !important;
+}
+
+/* Comparison tables (ASK DGB-SUP / markdown pipe tables) */
+.chat-compare-wrap {
+  max-width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(26, 26, 26, 0.1);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 1px 2px rgba(26, 26, 26, 0.04);
+}
+
+.chat-compare-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.chat-compare-table th,
+.chat-compare-table td {
+  padding: 0.55rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid rgba(26, 26, 26, 0.08);
+  border-right: 1px solid rgba(26, 26, 26, 0.06);
+}
+
+.chat-compare-table th:last-child,
+.chat-compare-table td:last-child {
+  border-right: none;
+}
+
+.chat-compare-table thead th {
+  background: rgba(249, 115, 22, 0.1);
+  color: #9a3412;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chat-compare-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.chat-compare-table tbody td:first-child {
+  font-weight: 600;
+  color: rgba(26, 26, 26, 0.78);
+  white-space: nowrap;
+}
+
+/* Taskly-style orange → white cloudy mesh */
+.bg-atmosphere {
+  position: absolute;
+  inset: 0;
+  background-color: #fff;
+  background-image:
+    radial-gradient(ellipse 90% 70% at 50% -5%, #ff9a3c 0%, transparent 58%),
+    radial-gradient(ellipse 55% 45% at 12% 18%, rgba(255, 140, 50, 0.85) 0%, transparent 55%),
+    radial-gradient(ellipse 50% 40% at 88% 12%, rgba(255, 122, 24, 0.75) 0%, transparent 50%),
+    radial-gradient(ellipse 70% 50% at 50% 8%, rgba(255, 176, 96, 0.9) 0%, transparent 60%),
+    radial-gradient(ellipse 80% 55% at 30% 35%, rgba(255, 200, 140, 0.45) 0%, transparent 55%),
+    radial-gradient(ellipse 60% 40% at 70% 40%, rgba(255, 230, 200, 0.5) 0%, transparent 50%),
+    linear-gradient(
+      180deg,
+      #ff7a1a 0%,
+      #ff8f3a 18%,
+      #ffb06a 38%,
+      #ffd2a8 58%,
+      #fff1e6 78%,
+      #ffffff 100%
+    );
+  filter: saturate(1.05);
+}
+
+.bg-atmosphere::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 40% 15%, rgba(255, 255, 255, 0.55) 0%, transparent 28%),
+    radial-gradient(circle at 65% 22%, rgba(255, 255, 255, 0.35) 0%, transparent 22%);
+  pointer-events: none;
+  mix-blend-mode: soft-light;
+}
+
+.glass-panel {
+  background: rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  box-shadow: 0 8px 32px rgba(255, 100, 20, 0.08);
+}
+
+.glass-strong {
+  background: rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(22px) saturate(1.15);
+  -webkit-backdrop-filter: blur(22px) saturate(1.15);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.06);
+}
+
+.thinking-ring {
+  width: 14px;
+  height: 14px;
+  border-radius: 9999px;
+  border: 2px dotted rgba(255, 255, 255, 0.85);
+  animation: spin-ring 1.2s linear infinite;
+}
+
+@keyframes spin-ring {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.selection-reply-btn {
+  animation: fade-up 0.15s ease-out;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

@@ -1,0 +1,10 @@
+fastapi==0.141.1
+google-generativeai==0.8.6
+litellm==1.100.1
+pypdf2==3.0.1
+pypdfium2==5.13.0
+python-dotenv==1.2.3
+reportlab==5.0.1
+uvicorn==0.52.4
+# Install local PageIndex from this folder:
+#   uv pip install --python .venv/bin/python -e "./PageIndex" -r requirements.txt

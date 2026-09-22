@@ -24,14 +24,35 @@
 .DS_Store
 *.pem
 
+# listing data (large CSV / local indexes)
+/data/*.csv
+/data/*.json
+!/data/.gitkeep
+
+# PageIndex / vectorless local env
+/vecrtorless rag/.venv/
+/vecrtorless rag/data/
+/vecrtorless rag/PageIndex/
+/vecrtorless rag/PageIndex/.git/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+langpanda/.venv/
+
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files
+.env
+.env.local
+.env.*.local
+!.env.example
 
 # vercel
 .vercel

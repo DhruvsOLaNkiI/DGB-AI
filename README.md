@@ -1,36 +1,63 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DBG-AI
 
-## Getting Started
+Gemini-style real estate chat assistant with **two retrieval modes**:
 
-First, run the development server:
+| Mode | How it works |
+| --- | --- |
+| **Vector RAG** | Local MiniLM embeddings + Pinecone similarity |
+| **Vectorless** | PageIndex-style hierarchical tree + Gemini reasoning (no vectors) |
+
+Switch modes anytime in the chat header.
+
+## Run
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Keys in `.env.local`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```env
+GEMINI_API_KEY=your_gemini_key          # chat + vectorless tree reasoning
+PINECONE_API_KEY=your_pinecone_key      # required only for Vector RAG
+PINECONE_INDEX=minilm                   # Dense, cosine, dimension 384
+LOCAL_EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2
+EMBEDDING_DIMENSIONS=384
+```
 
-## Learn More
+Never commit `.env.local`. Use `.env.example` as a template.
 
-To learn more about Next.js, take a look at the following resources:
+## Index listings (Vector RAG — local MiniLM)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Put CSV at `data/clean_dataset.csv`
+2. Pinecone index `minilm` must be **384** dimensions
+3. Run:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run index-listings
+```
 
-## Deploy on Vercel
+First run downloads MiniLM weights. Then upserts ~9k listings into Pinecone.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Vectorless / PageIndex folder
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Cloned + installed under [`vecrtorless rag/`](./vecrtorless%20rag/README.md):
+
+```bash
+npm run vectorless:demo-pdf   # sample PDF for PageIndex
+npm run vectorless:service    # optional FastAPI on :8765
+```
+
+In-app **Vectorless** mode uses Gemini over a sector/BHK tree of the CSV (no Pinecone). The PageIndex repo is available for PDF demos and further experiments.
+
+## What’s built
+
+- Gemini-style UI: sidebar, ask, photo, voice, **RAG ↔ Vectorless toggle**
+- Local **all-MiniLM-L6-v2** embeddings → Pinecone `minilm`
+- `/api/chat` accepts `mode: "rag" | "vectorless"`
+- Token budget meter in the header
+
+Full RAG explanation: [`docs/RAG.md`](docs/RAG.md)
