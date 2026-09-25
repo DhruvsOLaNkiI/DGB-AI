@@ -8,7 +8,7 @@ export type ChatMessage = {
   createdAt: number;
   /** How the assistant answer was produced (e.g. pandas-llm, web-fallback). */
   deliverySource?: string;
-  pandasEngine?: "pandas_only" | "pandas_llm";
+  pandasEngine?: "pandas_only" | "pandas_llm" | "firecrawl_llm";
 };
 
 export type Chat = {

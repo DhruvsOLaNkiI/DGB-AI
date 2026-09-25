@@ -97,9 +97,11 @@ export function MessageBubble({ message, onQuoteReply }: MessageBubbleProps) {
         if (!src && !message.pandasEngine) return null;
         const label = src
           ? pandasDeliveryLabel(src)
-          : message.pandasEngine === "pandas_llm"
-            ? "Pandas + LLM · CSV"
-            : "Only Pandas · CSV";
+          : message.pandasEngine === "firecrawl_llm"
+            ? "Firecrawl + LLM · Web"
+            : message.pandasEngine === "pandas_llm"
+              ? "Pandas + LLM · CSV"
+              : "Only Pandas · CSV";
         return (
           <div className="mb-1.5">
             <span className="inline-flex items-center rounded-full border border-black/10 bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium tracking-wide text-ink/55">

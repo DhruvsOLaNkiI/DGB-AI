@@ -1,3 +1,4 @@
+import type { AskProfile } from "@/lib/ask-profile";
 import type { RetrievalMode } from "@/lib/retrieval-mode";
 import type { ChatMessage } from "@/lib/types";
 
@@ -17,8 +18,9 @@ export type ChatApiResult =
       usage: ChatUsage;
       mode?: RetrievalMode;
       model?: string;
-      pandasEngine?: "pandas_only" | "pandas_llm";
+      pandasEngine?: "pandas_only" | "pandas_llm" | "firecrawl_llm";
       source?: string;
+      askState?: AskProfile | null;
     }
   | {
       ok: false;
@@ -26,7 +28,7 @@ export type ChatApiResult =
       usage?: ChatUsage;
       mode?: RetrievalMode;
       model?: string;
-      pandasEngine?: "pandas_only" | "pandas_llm";
+      pandasEngine?: "pandas_only" | "pandas_llm" | "firecrawl_llm";
     };
 
 export async function sendChatRequest(input: {
@@ -35,8 +37,9 @@ export async function sendChatRequest(input: {
   mode?: RetrievalMode;
   docId?: string | null;
   model?: string;
-  pandasEngine?: "pandas_only" | "pandas_llm";
+  pandasEngine?: "pandas_only" | "pandas_llm" | "firecrawl_llm";
   wordLimit?: number;
+  askProfile?: AskProfile | null;
 }): Promise<ChatApiResult> {
   const res = await fetch("/api/chat", {
     method: "POST",
@@ -48,6 +51,7 @@ export async function sendChatRequest(input: {
       model: input.model,
       pandasEngine: input.pandasEngine ?? "pandas_only",
       wordLimit: input.wordLimit,
+      askProfile: input.askProfile ?? null,
       messages: input.messages.map((m) => ({
         role: m.role,
         content: m.content,
@@ -62,8 +66,9 @@ export async function sendChatRequest(input: {
     usage?: ChatUsage;
     mode?: RetrievalMode;
     model?: string;
-    pandasEngine?: "pandas_only" | "pandas_llm";
+    pandasEngine?: "pandas_only" | "pandas_llm" | "firecrawl_llm";
     source?: string;
+    askState?: AskProfile | null;
   };
 
   if (!res.ok || !data.reply) {
@@ -85,5 +90,6 @@ export async function sendChatRequest(input: {
     model: data.model,
     pandasEngine: data.pandasEngine,
     source: data.source,
+    askState: data.askState ?? null,
   };
 }

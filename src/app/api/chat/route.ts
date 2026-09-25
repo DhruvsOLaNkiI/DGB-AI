@@ -25,7 +25,8 @@ import {
 } from "@/lib/rag";
 import { parseRetrievalMode, parsePandasEngine, type RetrievalMode, type PandasEngine } from "@/lib/retrieval-mode";
 import { addSessionUsage, getSessionUsage } from "@/lib/token-budget";
-import { queryLangPanda, buildAskDgbHistory } from "@/lib/langpanda";
+import type { AskProfile } from "@/lib/ask-profile";
+import { queryLangPanda, buildAskDgbContext } from "@/lib/langpanda";
 import { chatDocument } from "@/lib/vectorless-docs";
 import { retrieveListingsVectorless } from "@/lib/vectorless";
 import { parseWordLimit } from "@/lib/word-limit";
@@ -42,6 +43,7 @@ type ChatRequestBody = {
   model?: string | null;
   pandasEngine?: PandasEngine | null;
   wordLimit?: number | null;
+  askProfile?: AskProfile | null;
 };
 
 export async function POST(request: Request) {
@@ -60,6 +62,10 @@ export async function POST(request: Request) {
     const answerModel = parseAnswerModel(body.model);
     const pandasEngine = parsePandasEngine(body.pandasEngine);
     const wordLimit = parseWordLimit(body.wordLimit);
+    const askProfile =
+      body.askProfile && typeof body.askProfile === "object"
+        ? body.askProfile
+        : null;
     const useOllama = isOllamaAnswerModel(answerModel);
 
     if (messages.length === 0) {
@@ -143,13 +149,18 @@ export async function POST(request: Request) {
       // ASK DGB-SUP: Gemini own knowledge only — never CSV, never DDGS/web.
       if (mode === "ask_dgb_sup") {
         try {
-          const history = buildAskDgbHistory(messages, question);
+          const { history, olderSummary } = buildAskDgbContext(
+            messages,
+            question,
+          );
           const result = await queryLangPanda(
             question,
             "pandas_gemini",
             answerModel,
             wordLimit,
             history,
+            olderSummary,
+            askProfile,
           );
           const sessionUsed = addSessionUsage(sessionId, 0);
           return NextResponse.json({
@@ -158,6 +169,7 @@ export async function POST(request: Request) {
             mode,
             model: answerModel,
             source: result.source || "gemini-only",
+            askState: result.askState ?? null,
             usage: {
               promptTokens: 0,
               completionTokens: 0,
@@ -186,7 +198,11 @@ export async function POST(request: Request) {
         try {
           const result = await queryLangPanda(
             question,
-            pandasEngine === "pandas_llm" ? "pandas_llm" : "pandas_only",
+            pandasEngine === "firecrawl_llm"
+              ? "firecrawl_llm"
+              : pandasEngine === "pandas_llm"
+                ? "pandas_llm"
+                : "pandas_only",
             answerModel,
           );
           const sessionUsed = addSessionUsage(sessionId, 0);

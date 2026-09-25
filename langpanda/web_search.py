@@ -1,56 +1,131 @@
-"""Free web search fallback via DuckDuckGo (ddgs) — no API key required."""
+"""Web search fallback for LangPanda via Firecrawl (search + scrape → markdown)."""
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import urllib.error
+import urllib.request
+
+
+def _firecrawl_api_key() -> str:
+    return (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
+
+
+def _firecrawl_max_results(default: int = 2) -> int:
+    """How many scraped pages to keep (best result(s), not a snippet dump)."""
+    raw = (os.environ.get("FIRECRAWL_MAX_RESULTS") or "").strip()
+    try:
+        n = int(raw) if raw else default
+    except ValueError:
+        n = default
+    return max(1, min(n, 5))
 
 
 def free_web_search(query: str, max_results: int = 3) -> str:
     """
-    Search the public web for Noida property context.
-    Uses the ddgs package (DuckDuckGo). 100% free — no API key.
+    Search the public web for Noida property context via Firecrawl.
     Rewrites broad investment / “best sector” asks into market-analysis queries.
     """
     q = (query or "").strip()
     if not q:
         return "No external web results found."
+    return firecrawl_web_search(
+        q, max_results=_firecrawl_max_results(min(max_results, 2))
+    )
 
+
+def firecrawl_web_search(query: str, max_results: int = 2) -> str:
+    """
+    Firecrawl /v1/search with scrapeOptions → one/few clean markdown pages.
+    Best for “CSV missing amenity → find listings with prices → LLM answer”.
+    """
+    api_key = _firecrawl_api_key()
+    if not api_key:
+        return (
+            "Web search fallback unavailable: set FIRECRAWL_API_KEY in .env.local "
+            "(from firecrawl.dev)."
+        )
+
+    search_query = rewrite_web_search_query(query)
+    limit = max(1, min(int(max_results or 2), 5))
+    payload = {
+        "query": search_query,
+        "limit": limit,
+        "scrapeOptions": {
+            "formats": ["markdown"],
+            "onlyMainContent": True,
+        },
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.firecrawl.dev/v1/search",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
     try:
-        from ddgs import DDGS
-    except ImportError:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        err_body = ""
         try:
-            from duckduckgo_search import DDGS  # older package name
-        except ImportError:
-            return (
-                "Web search fallback unavailable: install `ddgs` in langpanda/.venv "
-                "(`pip install ddgs`)."
-            )
-
-    search_query = rewrite_web_search_query(q)
-    try:
-        results: list[dict] = []
-        # ddgs API variants: context manager and/or .text()
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(search_query, max_results=max_results))
-        except TypeError:
-            ddgs = DDGS()
-            results = list(ddgs.text(search_query, max_results=max_results))
-
-        if not results:
-            return "No external web results found."
-
-        snippets: list[str] = []
-        for i, row in enumerate(results[:max_results], start=1):
-            title = (row.get("title") or row.get("source") or f"Result {i}").strip()
-            body = (row.get("body") or row.get("snippet") or "").strip()
-            link = (row.get("href") or row.get("link") or row.get("url") or "").strip()
-            snippets.append(
-                f"[{i}] Source: {title}\nDetails: {body}\nLink: {link}"
-            )
-        return "\n\n".join(snippets)
+            err_body = exc.read().decode("utf-8", errors="replace")[:400]
+        except Exception:  # noqa: BLE001
+            pass
+        return f"Web search fallback failed: Firecrawl HTTP {exc.code} {err_body}".strip()
     except Exception as exc:  # noqa: BLE001
-        return f"Web search fallback failed: {str(exc)}"
+        return f"Web search fallback failed: {exc}"
+
+    if not isinstance(raw, dict) or raw.get("success") is False:
+        msg = ""
+        if isinstance(raw, dict):
+            msg = str(raw.get("error") or raw.get("message") or "")
+        return f"Web search fallback failed: Firecrawl {msg or 'unsuccessful response'}"
+
+    rows = raw.get("data")
+    if isinstance(rows, dict):
+        # v2-style: { web: [...] }
+        rows = rows.get("web") or rows.get("news") or []
+    if not isinstance(rows, list) or not rows:
+        return "No external web results found."
+
+    snippets: list[str] = []
+    for i, row in enumerate(rows[:limit], start=1):
+        if not isinstance(row, dict):
+            continue
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        title = (
+            (row.get("title") or meta.get("title") or f"Result {i}")
+            if isinstance(row.get("title") or meta.get("title"), str)
+            else f"Result {i}"
+        ).strip()
+        link = (
+            row.get("url")
+            or meta.get("sourceURL")
+            or meta.get("url")
+            or row.get("link")
+            or ""
+        )
+        link = str(link).strip()
+        markdown = (row.get("markdown") or row.get("content") or "").strip()
+        description = (row.get("description") or row.get("snippet") or "").strip()
+        body = markdown or description
+        if not body:
+            continue
+        # Keep LLM context bounded; prefer prices/amenities still visible.
+        if len(body) > 4500:
+            body = body[:4500].rstrip() + "\n…(truncated)"
+        snippets.append(f"[{i}] Source: {title}\nDetails: {body}\nLink: {link}")
+
+    if not snippets:
+        return "No external web results found."
+    return "\n\n".join(snippets)
 
 
 def is_investment_advice_query(question: str) -> bool:
@@ -93,7 +168,7 @@ def is_investment_advice_query(question: str) -> bool:
 
 def rewrite_web_search_query(question: str) -> str:
     """
-    Rewrite the DuckDuckGo query so investment / sector-profile asks hit
+    Rewrite the Firecrawl query so investment / sector-profile asks hit
     market-analysis pages instead of generic “X properties for sale” portals.
     """
     q = (question or "").strip()
@@ -272,7 +347,7 @@ def is_empty_pandas_reply(reply: str | None) -> bool:
 
 
 def is_web_search_usable(web_data: str | None) -> bool:
-    """False when DuckDuckGo returned nothing useful (or failed)."""
+    """False when Firecrawl returned nothing useful (or failed)."""
     if not web_data or not str(web_data).strip():
         return False
     text = str(web_data).strip().lower()
@@ -280,7 +355,9 @@ def is_web_search_usable(web_data: str | None) -> bool:
         "no external web results found",
         "web search fallback unavailable",
         "web search fallback failed",
-        "install `ddgs`",
+        "set firecrawl_api_key",
+        "firecrawl http",
+        "firecrawl unsuccessful",
     )
     if any(m in text for m in fail_markers):
         return False

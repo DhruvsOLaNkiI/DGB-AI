@@ -22,6 +22,11 @@ import {
 } from "@/lib/chat-store";
 import { sendChatRequest, type ChatUsage } from "@/lib/chat-api";
 import {
+  loadAskProfile,
+  mergeAskProfile,
+  saveAskProfile,
+} from "@/lib/ask-profile";
+import {
   PANDAS_ENGINE_KEY,
   RETRIEVAL_MODE_KEY,
   parsePandasEngine,
@@ -218,6 +223,8 @@ export function ChatShell() {
         pandasEngine:
           retrievalMode === "pandas" ? pandasEngine : undefined,
         wordLimit: retrievalMode === "ask_dgb_sup" ? wordLimit : undefined,
+        askProfile:
+          retrievalMode === "ask_dgb_sup" ? loadAskProfile() : undefined,
       });
 
       if (result.usage) setUsage(result.usage);
@@ -236,6 +243,10 @@ export function ChatShell() {
           updatedAt: Date.now(),
         }));
         return;
+      }
+
+      if (retrievalMode === "ask_dgb_sup" && result.askState) {
+        saveAskProfile(mergeAskProfile(loadAskProfile(), result.askState));
       }
 
       const assistantMessage: ChatMessage = {

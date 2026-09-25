@@ -2,12 +2,13 @@ export type RetrievalMode = "rag" | "vectorless" | "pandas" | "ask_dgb_sup";
 
 /**
  * When mode is pandas:
- * - pandas_only → exact CSV filters only
- * - pandas_llm  → CSV first, then UI LLM + web fallback
+ * - pandas_only   → exact CSV filters only
+ * - pandas_llm    → CSV first, then UI LLM + Firecrawl when needed
+ * - firecrawl_llm → skip CSV; Local LLM + Firecrawl search/scrape only
  * ASK DGB-SUP is a separate top-level mode (Gemini own knowledge only —
- * never CSV, never DuckDuckGo / web search).
+ * never CSV, never Firecrawl / web search).
  */
-export type PandasEngine = "pandas_only" | "pandas_llm";
+export type PandasEngine = "pandas_only" | "pandas_llm" | "firecrawl_llm";
 
 export const RETRIEVAL_MODE_KEY = "dbg-ai-retrieval-mode";
 export const PANDAS_ENGINE_KEY = "dbg-ai-pandas-engine";
@@ -30,7 +31,11 @@ export function parseRetrievalMode(value: unknown): RetrievalMode {
 }
 
 export function isPandasEngine(value: unknown): value is PandasEngine {
-  return value === "pandas_only" || value === "pandas_llm";
+  return (
+    value === "pandas_only" ||
+    value === "pandas_llm" ||
+    value === "firecrawl_llm"
+  );
 }
 
 export function parsePandasEngine(value: unknown): PandasEngine {
@@ -47,7 +52,9 @@ export function retrievalModeLabel(mode: RetrievalMode): string {
 }
 
 export function pandasEngineLabel(engine: PandasEngine): string {
-  return engine === "pandas_llm" ? "Pandas + LLM" : "Only Pandas";
+  if (engine === "firecrawl_llm") return "Firecrawl + LLM";
+  if (engine === "pandas_llm") return "Pandas + LLM";
+  return "Only Pandas";
 }
 
 /** Human label for which path delivered the answer. */
@@ -59,6 +66,8 @@ export function pandasDeliveryLabel(source: string | undefined | null): string {
       return "Pandas + LLM · CSV";
     case "web-fallback":
       return "Pandas + LLM · Web";
+    case "firecrawl-llm":
+      return "Firecrawl + LLM · Web";
     case "web-fallback-gemini":
     case "gemini-knowledge":
       return "Pandas + LLM · Gemini";

@@ -23,13 +23,27 @@ uv pip install --python .venv/bin/python -e "./PageIndex" -r requirements.txt
 ```bash
 # from repo root
 npm run vectorless:index -- /absolute/path/to/your.pdf
-
+ 
 # or
 cd "vecrtorless rag"
 source .venv/bin/activate
 python scripts/index_document.py ~/Documents/report.pdf
 python scripts/chat_document.py --doc-id <doc_id> "What is the summary?"
 ```
+python scripts/chat_document.py
+user = () => {
+    const app = user.agent(stram),
+        if(user > i ){
+            console.log("high rise ")
+        } else{
+            user.agenntic =() => {
+                mk =op {
+                    iop = Jo Sw !234~
+                }
+            }
+        }
+
+}
 
 # nor 
 When the 

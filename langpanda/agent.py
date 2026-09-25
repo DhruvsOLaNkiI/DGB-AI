@@ -280,13 +280,16 @@ _GEMINI_ONLY_PROMPT = """You are DBG-AI answering in ASK DGB-SUP mode.
 Answer ONLY from your own built-in Noida / NCR real-estate knowledge.
 
 HARD BANS (never do these):
-- Do NOT use web search, DuckDuckGo, browsing, live listings APIs, or any external tool.
+- Do NOT use web search, Firecrawl, browsing, live listings APIs, or any external tool.
 - Do NOT use any CSV / inventory / database.
 - Do NOT invent citations, news links, or “according to a recent article” claims.
 - Do NOT say you searched the web or looked up live data.
 
 CONVERSATION MEMORY (use for follow-ups like “that”, “earlier”, “same”, “down payment for it”):
 {history_block}
+
+STRUCTURED STATE (saved prefs + facts from this chat — prefer these over guessing):
+{state_block}
 
 Current user question: "{question}"
 
@@ -305,7 +308,10 @@ CRITICAL RULES:
    disclaimers in the reply. Start directly with the useful answer.
 7. Clean bullets. End with one short practical tip (e.g. verify live listings / share budget).
 8. Headings: use ## or ### only (never #### or raw # hashes left unreadable).
-9. When the current question refers to earlier turns, resolve references from CONVERSATION MEMORY.
+9. When the current question refers to earlier turns, resolve references from CONVERSATION MEMORY
+   (including the compressed older-context block when present).
+10. Honor STRUCTURED STATE (budget / BHK / goal / sectors / horizon / amenities). If the user
+    updates a fact later, use the latest value. Do not re-ask for facts already listed there.
 
 COMPARISON FORMAT (when the user compares 2+ options — e.g. sector A vs B,
 flats vs plots, fixed vs floating loan, buy vs rent, Project X vs Y):
@@ -330,9 +336,26 @@ Keep the WHOLE reply (including table) inside the WORD LIMIT above.
 
 _GEMINI_KNOWLEDGE_PROMPT = _GEMINI_ONLY_PROMPT
 
-# ASK DGB-SUP conversation buffer
+# ASK DGB-SUP conversation buffer + older-turn compression
 _ASK_HISTORY_MAX_TURNS = 8
 _ASK_HISTORY_ASSISTANT_MAX_WORDS = 180
+
+# Amenity phrases for ASK structured state (human labels, not CSV cols).
+_ASK_AMENITY_PATTERNS: list[tuple[str, str]] = [
+    (r"\b(swimming\s*pool|pool)\b", "swimming pool"),
+    (r"\b(gymnasium|gym)\b", "gym"),
+    (r"\b(car\s*parking|parking)\b", "parking"),
+    (r"\b(lift|elevator)\b", "lift"),
+    (r"\b(power\s*backup|backup)\b", "power backup"),
+    (r"\b(24\s*[x×]\s*7\s*security|24/7\s*security|cctv|security)\b", "security"),
+    (r"\b(club\s*house|clubhouse|club)\b", "clubhouse"),
+    (r"\b(landscaped(\s*gardens?)?|garden|park)\b", "garden/park"),
+    (r"\b(play\s*area|kids\s*area|children'?s?\s*play\s*area)\b", "play area"),
+    (r"\b(jogging\s*track)\b", "jogging track"),
+    (r"\b(golf\s*course|golf)\b", "golf"),
+    (r"\b(shopping\s*mall|mall)\b", "mall"),
+    (r"\b(vaastu|vastu)\b", "vastu"),
+]
 
 
 def _truncate_words(text: str, max_words: int) -> str:
@@ -346,16 +369,19 @@ def _format_history_block(
     history: list[dict] | None,
     *,
     current_question: str,
+    older_summary: str | None = None,
 ) -> str:
     """
-    Build a short conversation buffer for ASK DGB-SUP.
-    Skips the trailing duplicate of the current question when present.
+    Build conversation memory for ASK DGB-SUP:
+    optional compressed older context + last N full turns.
     """
-    if not history:
-        return "(No earlier turns in this chat.)"
+    parts: list[str] = []
+    older = (older_summary or "").strip()
+    if older:
+        parts.append(f"Older context (compressed from earlier turns):\n{older}")
 
     cleaned: list[tuple[str, str]] = []
-    for item in history:
+    for item in history or []:
         if not isinstance(item, dict):
             continue
         role = str(item.get("role") or "").strip().lower()
@@ -373,14 +399,269 @@ def _format_history_block(
 
     # Keep last N turns only.
     cleaned = cleaned[-_ASK_HISTORY_MAX_TURNS:]
-    if not cleaned:
-        return "(No earlier turns in this chat.)"
+    if cleaned:
+        lines = ["Earlier turns in this chat:"]
+        for role, content in cleaned:
+            label = "User" if role == "user" else "Assistant"
+            lines.append(f"{label}: {content}")
+        parts.append("\n".join(lines))
 
-    lines = ["Earlier turns in this chat:"]
-    for role, content in cleaned:
-        label = "User" if role == "user" else "Assistant"
-        lines.append(f"{label}: {content}")
-    return "\n".join(lines)
+    if not parts:
+        return "(No earlier turns in this chat.)"
+    return "\n\n".join(parts)
+
+
+def _empty_ask_state() -> dict:
+    return {
+        "budget_min_lakh": None,
+        "budget_max_lakh": None,
+        "bhk": None,
+        "sectors": [],
+        "goal": None,
+        "property_types": [],
+        "horizon_years": None,
+        "amenities": [],
+    }
+
+
+def _lakh_to_label(value: float | None) -> str | None:
+    if value is None:
+        return None
+    if value >= 100:
+        cr = value / 100.0
+        txt = f"{cr:.2f}".rstrip("0").rstrip(".")
+        return f"₹{txt} Cr"
+    txt = f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+    return f"₹{txt} Lakh"
+
+
+def _extract_ask_state_patch(text: str) -> dict:
+    """Pull structured preferences from one user utterance."""
+    q = (text or "").lower().strip()
+    patch: dict = {}
+    if not q:
+        return patch
+
+    # Budget (reuse shared price parser when available at runtime).
+    try:
+        min_p, max_p = _parse_price_bounds(q)
+    except Exception:  # noqa: BLE001
+        min_p, max_p = None, None
+    if min_p is not None:
+        patch["budget_min_lakh"] = float(min_p)
+    if max_p is not None:
+        patch["budget_max_lakh"] = float(max_p)
+
+    bhk_m = re.search(r"(\d+)\s*(?:bhk|rk)\b", q)
+    if bhk_m:
+        patch["bhk"] = int(bhk_m.group(1))
+
+    sectors = re.findall(r"sector\s*([0-9]+[a-z]?)", q)
+    if sectors:
+        # Preserve order, unique
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for s in sectors:
+            key = s.upper() if s[-1:].isalpha() else s
+            if key not in seen:
+                seen.add(key)
+                ordered.append(key)
+        patch["sectors"] = ordered
+
+    if re.search(
+        r"\b(invest(?:ment|ing)?|appreciation|roi|resale|capital\s+gain)\b", q
+    ):
+        patch["goal"] = "investment"
+    elif re.search(r"\b(rent(?:al)?|yield|tenant|lease)\b", q):
+        patch["goal"] = "rental_income"
+    elif re.search(
+        r"\b(live|self[-\s]?use|end[-\s]?use|family|own\s+stay|primary\s+home)\b", q
+    ):
+        patch["goal"] = "self_use"
+    elif re.search(r"\b(compar(?:e|ison)|vs\.?|versus)\b", q):
+        patch["goal"] = "compare"
+
+    types: list[str] = []
+    if re.search(r"\b(flat|apartment|builder\s*floor)\b", q):
+        types.append("flat")
+    if re.search(r"\b(plot|land)\b", q):
+        types.append("plot")
+    if re.search(r"\b(villa|independent\s+house)\b", q):
+        types.append("villa")
+    if re.search(r"\b(commercial|shop|office|retail)\b", q):
+        types.append("commercial")
+    if types:
+        patch["property_types"] = types
+
+    horizon_m = re.search(
+        r"\b(\d+)\s*(?:to|-|–)\s*(\d+)\s*(?:years?|yrs?)\b"
+        r"|\b(\d+)\s*(?:years?|yrs?)\b",
+        q,
+    )
+    if horizon_m and re.search(
+        r"\b(years?|yrs?|horizon|appreciate|invest|hold|return)", q
+    ):
+        # Prefer lower bound of a range, else the single number.
+        n = horizon_m.group(1) or horizon_m.group(3)
+        if n:
+            patch["horizon_years"] = int(n)
+
+    amenities: list[str] = []
+    for pattern, label in _ASK_AMENITY_PATTERNS:
+        if re.search(pattern, q, re.I) and label not in amenities:
+            amenities.append(label)
+    if amenities:
+        patch["amenities"] = amenities
+
+    return patch
+
+
+def _merge_ask_state(base: dict, patch: dict) -> dict:
+    """Later user facts override earlier ones; amenities accumulate uniquely."""
+    out = {
+        "budget_min_lakh": base.get("budget_min_lakh"),
+        "budget_max_lakh": base.get("budget_max_lakh"),
+        "bhk": base.get("bhk"),
+        "sectors": list(base.get("sectors") or []),
+        "goal": base.get("goal"),
+        "property_types": list(base.get("property_types") or []),
+        "horizon_years": base.get("horizon_years"),
+        "amenities": list(base.get("amenities") or []),
+    }
+    if "budget_min_lakh" in patch:
+        out["budget_min_lakh"] = patch["budget_min_lakh"]
+    if "budget_max_lakh" in patch:
+        out["budget_max_lakh"] = patch["budget_max_lakh"]
+    if "bhk" in patch and patch["bhk"] is not None:
+        out["bhk"] = patch["bhk"]
+    if "goal" in patch and patch["goal"]:
+        out["goal"] = patch["goal"]
+    if "horizon_years" in patch and patch["horizon_years"] is not None:
+        out["horizon_years"] = patch["horizon_years"]
+    if patch.get("sectors"):
+        # Latest mention replaces sector focus (clearer for “sector 150 instead”).
+        out["sectors"] = list(patch["sectors"])
+    if patch.get("property_types"):
+        out["property_types"] = list(patch["property_types"])
+    if patch.get("amenities"):
+        seen = set(out["amenities"])
+        for a in patch["amenities"]:
+            if a and a not in seen:
+                seen.add(a)
+                out["amenities"].append(a)
+    return out
+
+
+def _profile_as_patch(profile: dict | None) -> dict:
+    """Normalize a long-term ASK profile dict into a mergeable patch."""
+    if not profile or not isinstance(profile, dict):
+        return {}
+    patch: dict = {}
+    for key in (
+        "budget_min_lakh",
+        "budget_max_lakh",
+        "bhk",
+        "goal",
+        "horizon_years",
+    ):
+        if key in profile and profile[key] is not None:
+            patch[key] = profile[key]
+    if profile.get("sectors"):
+        patch["sectors"] = list(profile["sectors"])
+    if profile.get("property_types"):
+        patch["property_types"] = list(profile["property_types"])
+    if profile.get("amenities"):
+        patch["amenities"] = list(profile["amenities"])
+    return patch
+
+
+def _build_ask_structured_state(
+    history: list[dict] | None,
+    current_question: str,
+    *,
+    profile: dict | None = None,
+) -> dict:
+    """
+    Seed from long-term profile, then walk user turns oldest→newest;
+    current question last (wins conflicts).
+    """
+    state = _empty_ask_state()
+    state = _merge_ask_state(state, _profile_as_patch(profile))
+    user_texts: list[str] = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("role") or "").strip().lower() != "user":
+            continue
+        content = str(item.get("content") or "").strip()
+        if content:
+            user_texts.append(content)
+    cq = (current_question or "").strip()
+    if cq and (not user_texts or user_texts[-1] != cq):
+        user_texts.append(cq)
+    for text in user_texts:
+        state = _merge_ask_state(state, _extract_ask_state_patch(text))
+    return state
+
+
+def build_ask_dgb_state(
+    history: list[dict] | None,
+    current_question: str,
+    *,
+    profile: dict | None = None,
+) -> dict:
+    """Public helper for the FastAPI layer to return ask_state to the client."""
+    return _build_ask_structured_state(
+        history, current_question, profile=profile
+    )
+
+
+def _format_state_block(state: dict | None) -> str:
+    if not state:
+        return "(No structured preferences captured yet.)"
+
+    lines: list[str] = []
+    min_l = state.get("budget_min_lakh")
+    max_l = state.get("budget_max_lakh")
+    if min_l is not None and max_l is not None:
+        lines.append(
+            f"- Budget: {_lakh_to_label(min_l)} to {_lakh_to_label(max_l)}"
+        )
+    elif max_l is not None:
+        lines.append(f"- Budget: under {_lakh_to_label(max_l)}")
+    elif min_l is not None:
+        lines.append(f"- Budget: above {_lakh_to_label(min_l)}")
+
+    if state.get("bhk") is not None:
+        lines.append(f"- BHK: {state['bhk']}")
+    if state.get("goal"):
+        goal_labels = {
+            "investment": "investment / appreciation",
+            "rental_income": "rental income",
+            "self_use": "self-use / to live",
+            "compare": "compare options",
+        }
+        lines.append(f"- Goal: {goal_labels.get(state['goal'], state['goal'])}")
+    sectors = state.get("sectors") or []
+    if sectors:
+        lines.append(
+            "- Sectors: " + ", ".join(f"Sector {s}" for s in sectors)
+        )
+    types = state.get("property_types") or []
+    if types:
+        lines.append("- Property type: " + ", ".join(types))
+    if state.get("horizon_years") is not None:
+        lines.append(f"- Horizon: ~{state['horizon_years']} years")
+    amenities = state.get("amenities") or []
+    if amenities:
+        lines.append("- Amenities wanted: " + ", ".join(amenities))
+
+    if not lines:
+        return "(No structured preferences captured yet.)"
+    return (
+        "Known user context (later messages override earlier facts):\n"
+        + "\n".join(lines)
+    )
 
 
 def _word_limit_rule(word_limit: int | None) -> str:
@@ -427,11 +708,14 @@ def answer_with_gemini_only(
     model: str | None = None,
     word_limit: int | None = None,
     history: list[dict] | None = None,
+    older_summary: str | None = None,
+    profile: dict | None = None,
 ) -> tuple[str, str]:
     """
     ASK DGB-SUP: pure Gemini knowledge only.
-    Never CSV, never DuckDuckGo / web_search, never external tools.
-    Optional conversation buffer via history=[{role, content}, ...].
+    Never CSV, never Firecrawl / web_search, never external tools.
+    Optional conversation buffer via history=[{role, content}, ...],
+    older_summary for turns beyond the buffer, and long-term profile prefs.
     """
     if not _gemini_available():
         return (
@@ -463,10 +747,14 @@ def answer_with_gemini_only(
 
     q = (question or "").strip()
     limit = int(word_limit or 0)
+    state = _build_ask_structured_state(history, q, profile=profile)
     prompt = _GEMINI_ONLY_PROMPT.format(
         question=q,
         word_limit_rule=_word_limit_rule(limit),
-        history_block=_format_history_block(history, current_question=q),
+        history_block=_format_history_block(
+            history, current_question=q, older_summary=older_summary
+        ),
+        state_block=_format_state_block(state),
     )
     last_err: Exception | None = None
     for mid in candidates:
@@ -516,7 +804,7 @@ def _strip_gemini_disclaimer(text: str) -> str:
         r".*not\s+(our\s+)?csv\s+inventory|"
         r".*ask\s+dgb-?sup\s*\(.*|"
         r".*this\s+is\s+(ask\s+dgb|gemini)|"
-        r".*(web\s+search|duckduckgo|ddgs)"
+        r".*(web\s+search|firecrawl|duckduckgo|ddgs)"
         r").*$"
     )
     for i, line in enumerate(lines):
@@ -539,22 +827,37 @@ def synthesize_external_answer(
     *,
     model: str | None = None,
     missing_attribute: str | None = None,
+    firecrawl_only: bool = False,
 ) -> tuple[str, str]:
     """
-    Web search first; if unusable, Gemini knowledge fallback.
-    Returns (reply, source) where source is web-fallback | gemini-knowledge.
+    Firecrawl web search first; if unusable, Gemini knowledge fallback
+    (skipped when firecrawl_only — stay on web path only).
+    Returns (reply, source) where source is web-fallback | firecrawl-llm | gemini-knowledge.
     """
     from web_search import free_web_search, is_web_search_usable
 
-    web_data = free_web_search(question, max_results=3)
+    search_q = question
+    if firecrawl_only:
+        search_q = _llm_plan_firecrawl_query(question, model=model) or question
+
+    web_data = free_web_search(search_q, max_results=3)
     if is_web_search_usable(web_data):
         reply = format_web_fallback_with_llm(
             question,
             web_data,
             model=model,
             missing_attribute=missing_attribute,
+            firecrawl_only=firecrawl_only,
         )
-        return reply, "web-fallback"
+        return reply, ("firecrawl-llm" if firecrawl_only else "web-fallback")
+
+    if firecrawl_only:
+        return (
+            "Firecrawl didn’t return usable web results for that question. "
+            "Check FIRECRAWL_API_KEY in .env.local, or try a more specific "
+            "Noida property query (sector / amenity / price).",
+            "error",
+        )
 
     # Web dead → Gemini knowledge (requires API key)
     print(
@@ -573,6 +876,7 @@ def synthesize_external_answer(
             question=question.strip(),
             word_limit_rule=_word_limit_rule(0),
             history_block="(No earlier turns in this chat.)",
+            state_block="(No structured preferences captured yet.)",
         )
         text, _which = _invoke_llm_with_gemini_backup(
             prompt, model="gemini-3.6-flash", temperature=0.3
@@ -587,6 +891,37 @@ def synthesize_external_answer(
         "Try again shortly, or ask with a sector / BHK / budget for CSV matches.",
         "error",
     )
+
+
+_FIRECRAWL_QUERY_PLAN_PROMPT = """You plan a web search for a Noida real-estate assistant.
+Rewrite the user question into ONE short search query (max 16 words) that will find
+pages with prices, amenities, and project details. Keep sector numbers and amenities.
+Output ONLY the search query text — no quotes, no explanation.
+
+User question: {question}
+"""
+
+
+def _llm_plan_firecrawl_query(question: str, *, model: str | None = None) -> str | None:
+    """Local/UI LLM turns the user ask into a focused Firecrawl search string."""
+    q = (question or "").strip()
+    if not q:
+        return None
+    try:
+        prompt = _FIRECRAWL_QUERY_PLAN_PROMPT.format(question=q)
+        text, _which = _invoke_llm_with_gemini_backup(
+            prompt, model=model, temperature=0.1
+        )
+        planned = (text or "").strip().splitlines()[0].strip().strip("\"'")
+        # Guard: keep it short and real-estate shaped
+        if not planned or len(planned) > 160:
+            return None
+        if planned.lower().startswith(("i ", "sure", "here", "the search")):
+            return None
+        return planned
+    except Exception as exc:  # noqa: BLE001
+        print(f"[langpanda] firecrawl query plan failed: {exc}", file=sys.stderr)
+        return None
 
 
 _llm = None
@@ -743,14 +1078,24 @@ def format_web_fallback_with_llm(
     web_data: str,
     model: str | None = None,
     missing_attribute: str | None = None,
+    firecrawl_only: bool = False,
 ) -> str:
-    """Synthesize a disclosed web-fallback answer from free search snippets."""
+    """Synthesize a disclosed web-fallback answer from Firecrawl page content."""
     from web_search import is_investment_advice_query
 
     web_data = (web_data or "").strip() or "No external web results found."
     investment = is_investment_advice_query(question)
 
-    if missing_attribute:
+    if firecrawl_only:
+        opening = (
+            "Here is what live web sources show for your question "
+            "(Firecrawl search + scrape; not our CSV inventory):"
+        )
+        attribute_note = (
+            "\nAnswer ONLY from the scraped web content below. Prefer concrete "
+            "prices, sectors, amenities, and project names when present."
+        )
+    elif missing_attribute:
         opening = (
             f"Our internal inventory does not track “{missing_attribute}”, so we "
             "cannot filter for it directly. However, based on current market "
@@ -780,7 +1125,7 @@ def format_web_fallback_with_llm(
 
     # If LLM is unavailable, still return a usable plain-text fallback.
     try:
-        if investment:
+        if investment and not firecrawl_only:
             prompt = _INVESTMENT_BRIEFING_PROMPT.format(
                 question=question.strip(),
                 web_data=web_data,
@@ -807,6 +1152,8 @@ def format_web_fallback_with_llm(
                 or "based on current market" in low
                 or "csv inventory" in low
                 or "broader real-estate profile" in low
+                or "firecrawl" in low
+                or "live web sources" in low
             )
             if not already_opened:
                 return f"{opening}\n\n{cleaned}"
@@ -814,7 +1161,7 @@ def format_web_fallback_with_llm(
     except Exception as exc:  # noqa: BLE001
         print(f"[langpanda] web fallback LLM failed: {exc}", file=sys.stderr)
 
-    if investment:
+    if investment and not firecrawl_only:
         return _investment_briefing_fallback(opening)
     return (
         f"{opening}\n\n"
@@ -922,17 +1269,21 @@ def run_real_estate_pipeline(
     use_llm: bool = False,
     model: str | None = None,
     force_gemini: bool = False,
+    force_firecrawl: bool = False,
     word_limit: int | None = None,
     history: list[dict] | None = None,
+    older_summary: str | None = None,
+    profile: dict | None = None,
 ) -> tuple[str, str]:
     """
     Unified pipeline:
       1) Pandas against clean_dataset.csv  (Only Pandas / Pandas + LLM)
       2) If hits → format (optional LLM polish)
-      3) Else / pure external market query → web + LLM (or Gemini knowledge)
+      3) Else / pure external market query → Firecrawl + LLM (or Gemini knowledge)
+      force_firecrawl=True → skip CSV; Local LLM plans search → Firecrawl → Local LLM answer
     Returns (reply, source).
     force_gemini=True → ASK DGB-SUP: Gemini own knowledge ONLY
-      (no CSV, no DuckDuckGo / web_search, no external tools).
+      (no CSV, no Firecrawl / web_search, no external tools).
     """
     from web_search import (
         is_external_market_query,
@@ -947,7 +1298,7 @@ def run_real_estate_pipeline(
         return "Please ask a property question.", "error"
 
     if force_gemini:
-        # ASK DGB-SUP — exit immediately; never reach Pandas or DDGS below.
+        # ASK DGB-SUP — exit immediately; never reach Pandas or Firecrawl below.
         if not model or "ollama" in model.lower() or model.lower().startswith("llama"):
             model = (
                 os.environ.get("LANGPANDA_GEMINI_MODEL")
@@ -957,12 +1308,30 @@ def run_real_estate_pipeline(
         if not is_real_estate_scope(q):
             return out_of_scope_reply(), "out-of-scope"
         return answer_with_gemini_only(
-            q, model=model, word_limit=word_limit, history=history
+            q,
+            model=model,
+            word_limit=word_limit,
+            history=history,
+            older_summary=older_summary,
+            profile=profile,
         )
 
     # Off-topic (cars, phones, food, …) → polite refusal, never Pandas/web.
     if not is_real_estate_scope(q):
         return out_of_scope_reply(), "out-of-scope"
+
+    # Firecrawl + LLM only — skip CSV entirely.
+    if force_firecrawl:
+        if not _web_fallback_enabled():
+            return (
+                "Firecrawl mode is off (LANGPANDA_WEB_FALLBACK=0). "
+                "Turn it back on in .env.local.",
+                "error",
+            )
+        reply, source = synthesize_external_answer(
+            q, model=model, firecrawl_only=True
+        )
+        return reply, source
 
     intent = parse_listing_intent(q)
     has_inventory_shape = bool(
@@ -1046,14 +1415,20 @@ def query_real_estate_agent(
     force_gemini: bool = False,
     word_limit: int | None = None,
     history: list[dict] | None = None,
+    older_summary: str | None = None,
+    profile: dict | None = None,
+    force_firecrawl: bool = False,
 ) -> str:
     """
     use_llm=False → Only Pandas (exact facts; no web).
-    use_llm=True  → Pandas first, then free web search fallback when needed.
+    use_llm=True  → Pandas first, then Firecrawl web fallback when needed.
+    force_firecrawl → Skip CSV; Local LLM + Firecrawl only.
     force_gemini  → Manual Gemini Only mode (never Ollama).
     model         → UI answer-model id (gemini-… or ollama/…).
     word_limit    → ASK DGB-SUP max words (0 = unlimited).
     history       → ASK DGB-SUP conversation buffer [{role, content}, ...].
+    older_summary → compressed user asks beyond the buffer.
+    profile       → long-term ASK prefs (budget / BHK / amenities / …).
     Always returns cleaned final text for the API/UI (no chain logs).
     """
     try:
@@ -1062,8 +1437,11 @@ def query_real_estate_agent(
             use_llm=use_llm,
             model=model,
             force_gemini=force_gemini,
+            force_firecrawl=force_firecrawl,
             word_limit=word_limit,
             history=history,
+            older_summary=older_summary,
+            profile=profile,
         )
         return _clean_agent_reply(reply)
     except Exception as e:

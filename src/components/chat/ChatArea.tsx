@@ -179,9 +179,21 @@ export function ChatArea({
                     ? "bg-white text-ink shadow-sm"
                     : "text-white/80 hover:text-white"
                 }`}
-                title="CSV first, then UI LLM + web fallback when needed"
+                title="CSV first, then UI LLM + Firecrawl when needed"
               >
                 Pandas + LLM
+              </button>
+              <button
+                type="button"
+                onClick={() => onPandasEngineChange("firecrawl_llm")}
+                className={`whitespace-nowrap rounded-full px-2 py-1 text-[10px] font-medium transition sm:text-[11px] ${
+                  pandasEngine === "firecrawl_llm"
+                    ? "bg-white text-ink shadow-sm"
+                    : "text-white/80 hover:text-white"
+                }`}
+                title="Skip CSV: Local LLM plans search → Firecrawl gathers → Local LLM answers"
+              >
+                Firecrawl + LLM
               </button>
             </div>
           )}
@@ -280,6 +292,17 @@ export function ChatArea({
               }`}
             >
               Pandas + LLM
+            </button>
+            <button
+              type="button"
+              onClick={() => onPandasEngineChange("firecrawl_llm")}
+              className={`flex-1 rounded-xl px-2 py-1.5 text-[11px] font-medium ${
+                pandasEngine === "firecrawl_llm"
+                  ? "bg-white text-ink"
+                  : "text-white/80"
+              }`}
+            >
+              Firecrawl
             </button>
           </div>
         )}
